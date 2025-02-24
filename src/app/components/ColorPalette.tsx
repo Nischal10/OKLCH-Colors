@@ -36,46 +36,57 @@ const colorPatterns = {
     900: 0.55,
     950: 0.35    // Low chroma for darkest shade
   },
-  // Standard lightness values (derived from analyzing patterns)
+  // Standard lightness values (OKLCH)
   lightness: {
-    50: 0.975,   // Lightest
-    100: 0.945,
-    200: 0.895,
-    300: 0.82,
-    400: 0.72,
-    500: 0.65,   // Mid point
-    600: 0.58,
-    700: 0.51,
+    50: 0.98,    // Lightest
+    100: 0.95,
+    200: 0.92,
+    300: 0.86,
+    400: 0.76,
+    500: 0.68,   // Mid point
+    600: 0.60,
+    700: 0.52,
     800: 0.44,
-    900: 0.38,
-    950: 0.27    // Darkest
+    900: 0.32,
+    950: 0.20    // Darkest
   },
   // HSL lightness mapping for positioning
   hslLightness: {
     50: 98,      // Lightest
     100: 95,
-    200: 90,
-    300: 82,
-    400: 72,
-    500: 65,     // Mid point
-    600: 58,
-    700: 51,
+    200: 92,
+    300: 86,
+    400: 76,
+    500: 68,     // Mid point
+    600: 60,
+    700: 52,
     800: 44,
-    900: 38,
-    950: 27      // Darkest
+    900: 32,
+    950: 20      // Darkest
   }
 };
 
-function findClosestShade(hslLightness: number): ShadeNumber {
-  // Find the closest shade based on HSL lightness value
+function findClosestShade(hslLightness: number, oklchLightness: number): ShadeNumber {
+  // Find the closest shade based on both HSL and OKLCH lightness values
   let closestShade: ShadeNumber = 500;
   let minDiff = Infinity;
 
-  Object.entries(colorPatterns.hslLightness).forEach(([shade, l]) => {
-    const diff = Math.abs(l - hslLightness);
-    if (diff < minDiff) {
-      minDiff = diff;
-      closestShade = parseInt(shade) as ShadeNumber;
+  // Convert OKLCH lightness to percentage for easier comparison
+  const oklchLightnessPercent = oklchLightness * 100;
+
+  Object.entries(colorPatterns.hslLightness).forEach(([shadeStr, l]) => {
+    const shade = Number(shadeStr) as ShadeNumber;
+    
+    // Give more weight to HSL lightness for better positioning
+    const hslDiff = Math.abs(l - hslLightness) * 2; // Double weight for HSL
+    const oklchDiff = Math.abs(colorPatterns.lightness[shade] * 100 - oklchLightnessPercent);
+    
+    // Weight HSL more heavily (2:1 ratio)
+    const avgDiff = (hslDiff * 2 + oklchDiff) / 3;
+    
+    if (avgDiff < minDiff) {
+      minDiff = avgDiff;
+      closestShade = shade;
     }
   });
 
@@ -85,11 +96,15 @@ function findClosestShade(hslLightness: number): ShadeNumber {
 function generateShades(baseL: number, baseC: number, baseH: number, baseHslL: number) {
   const oklchToRgb = converter('oklch', 'rgb');
   
-  // Find the closest shade based on HSL lightness
-  const baseShade = findClosestShade(baseHslL * 100);
+  // Find the closest shade based on both HSL and OKLCH lightness, with HSL weighted more heavily
+  const baseShade = findClosestShade(baseHslL * 100, baseL);
   
-  // Find the maximum chroma that should be used, but cap it to prevent hue shifting
-  const maxChroma = Math.min(baseC / colorPatterns.chromaRatios[baseShade], 0.4);
+  // Special handling for yellow hues (around 75-90 degrees)
+  const isYellowish = baseH >= 70 && baseH <= 95;
+  
+  // Adjust max chroma based on hue - yellows need less chroma to maintain their hue
+  const chromaCap = isYellowish ? 0.3 : 0.4;
+  const maxChroma = Math.min(baseC / colorPatterns.chromaRatios[baseShade], chromaCap);
   
   return shades.map(shade => {
     // Calculate target lightness with smooth transition near base color
@@ -127,11 +142,17 @@ function generateShades(baseL: number, baseC: number, baseH: number, baseHslL: n
     // Calculate target chroma with smooth transition
     let targetC = maxChroma * colorPatterns.chromaRatios[shade];
     
+    // For yellows, reduce chroma more aggressively in darker shades to prevent red shift
+    if (isYellowish && shade >= 500) {
+      const reductionFactor = 1 - ((shade - 500) / 900) * 0.3; // Gradually reduce chroma more
+      targetC *= reductionFactor;
+    }
+    
     if (distanceFromBase <= 200) {
       // Smoothly transition chroma near the base color
       const transitionWeight = Math.max(0, 1 - distanceFromBase / 200);
       const standardC = maxChroma * colorPatterns.chromaRatios[shade];
-      const baseRelativeC = Math.min(baseC, 0.4); // Cap base chroma to prevent hue shifting
+      const baseRelativeC = Math.min(baseC, chromaCap);
       
       // Blend between standard and base-relative chroma
       targetC = standardC * (1 - transitionWeight) + baseRelativeC * transitionWeight;
@@ -176,12 +197,6 @@ export default function ColorPalette() {
   const [mounted, setMounted] = useState(false);
   const [baseColor, setBaseColor] = useState('#00FF1E');
   const [shadeColors, setShadeColors] = useState<Array<{ color: string; oklch: string; hsl: string; isKeyColor: boolean; isBaseColor: boolean }>>([]);
-  const [colorFormats, setColorFormats] = useState<{
-    hex: string;
-    rgb: string;
-    hsl: string;
-    oklch: string;
-  }>({ hex: '', rgb: '', hsl: '', oklch: '' });
 
   useEffect(() => {
     setMounted(true);
@@ -191,27 +206,11 @@ export default function ColorPalette() {
     setTheme(theme === 'dark' ? 'light' : 'dark');
   };
 
-  const updateColorFormats = useCallback((hex: string) => {
-    const color = oklch(hex);
-    if (!color || color.l === undefined) return;
-
-    const rgbColor = converter('oklch', 'rgb')(color);
-    const hslColor = converter('rgb', 'hsl')(rgbColor);
-    
-    setColorFormats({
-      hex: hex.toUpperCase(),
-      rgb: formatHex(rgbColor),
-      hsl: formatHsl(hslColor) || '',
-      oklch: `oklch(${(color.l * 100).toFixed(0)}% ${(color.c || 0).toFixed(3)} ${Math.round(color.h || 0)})`
-    });
-  }, []);
-
   const updatePalette = useCallback((hex: string) => {
     const { l, c, h, hsl_l } = hexToOKLCH(hex);
     const newShades = generateShades(l, c, h, hsl_l);
     setShadeColors(newShades);
-    updateColorFormats(hex);
-  }, [updateColorFormats]);
+  }, []);
 
   useEffect(() => {
     updatePalette(baseColor);
@@ -226,40 +225,61 @@ export default function ColorPalette() {
     return null;
   }
 
+  // Get the current base color formats using culori
+  const baseColorFormats = (() => {
+    const color = oklch(baseColor);
+    if (!color || color.l === undefined) return { hex: '', oklch: '', hsl: '' };
+
+    const hslColor = converter('oklch', 'hsl')(color);
+    
+    return {
+      hex: baseColor.toUpperCase(),
+      oklch: `oklch(${(color.l * 100).toFixed(0)}% ${(color.c || 0).toFixed(3)} ${Math.round(color.h || 0)})`,
+      hsl: formatHsl(hslColor) || ''
+    };
+  })();
+
   return (
     <div className="flex flex-col items-center w-full max-w-6xl mx-auto">
       <div className="w-full grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 px-4 mb-12">
-        {shadeColors.map((colorData, index) => (
-          <div
-            key={shades[index]}
-            className="bg-card text-card-foreground flex items-center gap-4 p-6 rounded-xl border border-border"
-          >
-            <div className="relative w-16 h-16">
-              <div
-                className="w-full h-full rounded-lg border border-border"
-                style={{ backgroundColor: colorData.color }}
-              />
-              {colorData.isBaseColor && (
-                <div className="absolute inset-0 flex items-center justify-center">
-                  <div className="w-4 h-4 rounded-full bg-white ring-4 ring-primary" />
-                </div>
-              )}
-            </div>
-            <div className="flex-1">
-              <div className="text-lg font-medium mb-2 text-foreground flex items-center gap-2">
-                Shade {shades[index]}
+        {shadeColors.map((colorData, index) => {
+          // Get the latest color formats for each shade using culori
+          const color = oklch(colorData.color);
+          const hslColor = color ? converter('oklch', 'hsl')(color) : null;
+          const hslStr = hslColor ? formatHsl(hslColor) : '';
+          
+          return (
+            <div
+              key={shades[index]}
+              className="bg-card text-card-foreground flex items-center gap-4 p-6 rounded-xl border border-border"
+            >
+              <div className="relative w-16 h-16">
+                <div
+                  className="w-full h-full rounded-lg border border-border"
+                  style={{ backgroundColor: colorData.color }}
+                />
                 {colorData.isBaseColor && (
-                  <span className="text-xs font-normal text-primary">(Base Color)</span>
+                  <div className="absolute inset-0 flex items-center justify-center">
+                    <div className="w-4 h-4 rounded-full bg-white ring-4 ring-primary" />
+                  </div>
                 )}
               </div>
-              <div className="font-mono text-xs space-y-1 text-muted-foreground">
-                <div>{colorData.color.toUpperCase()}</div>
-                <div>{colorData.oklch}</div>
-                <div>{colorData.hsl}</div>
+              <div className="flex-1">
+                <div className="text-lg font-medium mb-2 text-foreground flex items-center gap-2">
+                  Shade {shades[index]}
+                  {colorData.isBaseColor && (
+                    <span className="text-xs font-normal text-primary">(Base Color)</span>
+                  )}
+                </div>
+                <div className="font-mono text-xs space-y-1 text-muted-foreground">
+                  <div>{colorData.color.toUpperCase()}</div>
+                  <div>{colorData.oklch}</div>
+                  <div>{hslStr}</div>
+                </div>
               </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       <div className="w-full flex flex-col gap-6 px-4">
@@ -276,9 +296,9 @@ export default function ColorPalette() {
             <div className="flex flex-col gap-2">
               <span className="text-xl font-medium text-foreground">Select base color</span>
               <div className="flex flex-col gap-1 font-mono text-sm text-muted-foreground">
-                <div>{colorFormats.hex}</div>
-                <div>{colorFormats.oklch}</div>
-                <div>{colorFormats.hsl}</div>
+                <div>{baseColorFormats.hex}</div>
+                <div>{baseColorFormats.oklch}</div>
+                <div>{baseColorFormats.hsl}</div>
               </div>
             </div>
           </div>
